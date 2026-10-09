@@ -3,6 +3,7 @@
 - Compilador Arm GNU Toolchain
 - Cmake
 - STlink
+- Ninja
 
 
 - A pasta Gerador PWM é apenas um código teste para gerar sinais em dois canais PWM e um botão que altera a frequência do PWM
