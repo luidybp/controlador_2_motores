@@ -1,5 +1,6 @@
-# Projeto de STM32F411
+# Projeto de um controlador sensorless microcontrolado para 2 motores CC com alimentação 180 Vcc 
 
+- STM32F411
 - Compilador Arm GNU Toolchain
 - Cmake
 - STlink
