@@ -17,3 +17,16 @@ Thumbs.db
 
 mx.scratch
 !.settings
+
+
+# KiCad
+**/*-backups/
+*.kicad_prl
+fp-info-cache
+_autosave-*
+*.bak
+*.lck
+~*.lck
+*-rescue.*
+.history/
+_restore_backup_*/
