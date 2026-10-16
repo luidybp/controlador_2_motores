@@ -53,7 +53,7 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
-extern uint8_t sistema_liberado;
+extern volatile uint8_t sistema_liberado;
 extern uint32_t pot1;
 extern uint32_t pot2;
 extern float pot1_fiir;
@@ -62,7 +62,13 @@ extern uint16_t pwm_max;
 extern float alpha;
 extern volatile uint16_t valores_adc[3];
 extern TIM_HandleTypeDef htim1;
-uint8_t DelayControle = 5;
+extern ADC_HandleTypeDef hadc1;
+extern uint16_t tensao_barramento1;
+extern uint16_t tensao_barramento2;
+
+uint8_t DelayControle = 5;  // 5 ms (200 Hz) para proteção e filtro rápido
+uint8_t DelayIHM = 20;      // 20 ms (50 Hz) para botão e IHM
+
 extern uint32_t emfmot1;
 extern uint32_t emfmot2;
 uint8_t divisor_lcd = 0;
@@ -128,7 +134,8 @@ void MX_FREERTOS_Init(void) {
   TaskControleHandle = osThreadNew(StartTaskControle, NULL, &TaskControle_attributes);
 
   /* creation of TaskIHM */
-  TaskIHMHandle = osThreadNew(StartTaskIHM, NULL, &TaskIHM_attributes);
+  TaskIHMHandle = osThreadNew(StartTaskIHM, NULL, &TaskControle_attributes); // Mantém atributos ou TaskIHM_attributes
+  /* Correção: usa TaskIHM_attributes na criação da TaskIHM */
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -151,46 +158,52 @@ void StartTaskControle(void *argument)
 {
   /* USER CODE BEGIN StartTaskControle */
 
+  // =========================================================================
+  // SINTONIA DO CONTROLADOR PI (Alterar Kp e Ki AQUI durante os testes)
+  // =========================================================================
   PID_Controller pid_motor1;
-  pid_motor1.Kp = 1.0f;     // Valores iniciais para você sintonizar depois
-  pid_motor1.Ki = 0.0f;
-  pid_motor1.Kd = 0.0f;
-  pid_motor1.Ts = DelayControle/1000.0f;   // 5 milissegundos do osDelay(5)
-  pid_motor1.erro_anterior = 0.0f;
+  pid_motor1.Kp = 1.0f;     // Ganho Proporcional do Motor 1
+  pid_motor1.Ki = 0.0f;     // Ganho Integral do Motor 1
+  pid_motor1.Ts = 0.2f;     // 200 ms (5 Hz = 40 ciclos de 5 ms)
   pid_motor1.soma_integral = 0.0f;
-  pid_motor1.limite_max = (float)(1000 - pwm_max); // Seu limite de hardware
+  pid_motor1.limite_max = (float)(1000 - pwm_max); // Limite de hardware (800)
   pid_motor1.limite_min = 0.0f;
 
-
   PID_Controller pid_motor2;
-  pid_motor2.Kp = 1.0f;     // Valores iniciais para você sintonizar depois
-  pid_motor2.Ki = 0.0f;
-  pid_motor2.Kd = 0.0f;
-  pid_motor2.Ts = DelayControle/1000.0f;   // 5 milissegundos do osDelay(5)
-  pid_motor2.erro_anterior = 0.0f;
+  pid_motor2.Kp = 1.0f;     // Ganho Proporcional do Motor 2
+  pid_motor2.Ki = 0.0f;     // Ganho Integral do Motor 2
+  pid_motor2.Ts = 0.2f;     // 200 ms (5 Hz = 40 ciclos de 5 ms)
   pid_motor2.soma_integral = 0.0f;
-  pid_motor2.limite_max = (float)(1000 - pwm_max); // Seu limite de hardware
+  pid_motor2.limite_max = (float)(1000 - pwm_max); // Limite de hardware (800)
   pid_motor2.limite_min = 0.0f;
 
+  // Variáveis de estado da malha de 5 Hz (40 ciclos * 5 ms = 200 ms)
+  uint8_t ciclo_pi = 0;
+  float esforco_m1 = 0.0f;
+  float esforco_m2 = 0.0f;
+
   /* Infinite loop */
+  uint32_t tick_controle = osKernelGetTickCount();
   for(;;)
   {
+    // Proteção ANSI 51 vigia a corrente todos os 5 ms (200 Hz)
     funcao_51(); 
     
-    if(sistema_liberado == 1){ 
+    if (sistema_liberado == 1) { 
 
-      //valores_adc é um valor que vem direto da memória do STM do ADC dos potenciometros
-      //valores vao de 1 a 1000
-      pot1 = MAP(valores_adc[0], 0, ADC_MAX_VAL, 0, 1000 - pwm_max); //comanda a velocidade da bola de 0 ate pwm max para ter folga nos moteres
-      pot2 = MAP(valores_adc[1], 0, ADC_MAX_VAL, 0, 1000);  // comanda o spin da bola
-      emf();
+      // 1. Fotografa as leituras do DMA localmente para evitar Race Condition
+      uint16_t raw_adc0 = valores_adc[0];
+      uint16_t raw_adc1 = valores_adc[1];
 
-      //filtragem do input, uso de Filtro IIR
-      //y[n] = alpha * x[n] + (1 - alpha) * y[n-1]
-      pot1_fiir = (alpha * pot1) + ((1.0f - alpha) * pot1_fiir);
-      pot2_fiir = (alpha * pot2) + ((1.0f - alpha) * pot2_fiir); 
+      pot1 = MAP((int32_t)raw_adc0, 0, ADC_MAX_VAL, 0, 1000 - pwm_max); // Velocidade (0 a 800)
+      pot2 = MAP((int32_t)raw_adc1, 0, ADC_MAX_VAL, 0, 1000);           // Spin (0 a 1000)
 
-      float fator_spin = pot2_fiir / 10000.0f; //permitindo adicionar até 10% de velocidade a mais no motor 1
+      // 2. Filtro IIR passa-baixas nos potenciômetros (atualizado a 200 Hz para resposta suave)
+      pot1_fiir = (alpha * (float)pot1) + ((1.0f - alpha) * pot1_fiir);
+      pot2_fiir = (alpha * (float)pot2) + ((1.0f - alpha) * pot2_fiir); 
+
+      // 3. Cálculo dos Setpoints com compensação de saturação do Spin
+      float fator_spin = pot2_fiir / 10000.0f; // Até +10% no Motor 1
       float setpoint_m1 = pot1_fiir * (1.0f + fator_spin); 
       float setpoint_m2 = pot1_fiir;
       
@@ -207,36 +220,103 @@ void StartTaskControle(void *argument)
         }
       }
 
-      float velocidade_real_m1 = (float)emfmot1; // precisamos analisar dps se o valor medido é realmente linear com o RPM
-      float velocidade_real_m2 = (float)emfmot2;
+      // =====================================================================
+      // MÁQUINA DE TEMPORIZAÇÃO DE 5 Hz (Período = 200 ms = 40 ciclos de 5 ms)
+      // =====================================================================
+      if (ciclo_pi < 38) 
+      {
+        // --- CICLOS 0 A 37 (0 a 190 ms): Motores alimentados normalmente ---
+        
+        // (Opcional em bancada sem motor): Para acompanhar o potenciômetro em malha aberta,
+        // descomente as duas linhas abaixo. Quando ativar o PI no Ciclo 39, deixe-as comentadas:
+        esforco_m1 = setpoint_m1;
+        esforco_m2 = setpoint_m2;
 
+        uint16_t ccr_m1 = (uint16_t)MAX(1000.0f - esforco_m1, (float)pwm_max);
+        uint16_t ccr_m2 = (uint16_t)MAX(1000.0f - esforco_m2, (float)pwm_max);
 
-      //PID
+        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, ccr_m1);
+        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, ccr_m2);
 
-      // Comente o cálculo do PID:
-      // float esforco_m1 = calcular_PID(&pid_motor1, setpoint_m1, velocidade_real_m1);
-      // float esforco_m2 = calcular_PID(&pid_motor2, setpoint_m2, velocidade_real_m2);
+        // Posiciona o trigger na metade do tempo de chave aberta (off-time) do Motor 1
+        // Aqui o diodo de roda livre está conduzindo em 1 kHz (mede a tensão do barramento)
+        uint16_t trigger_motor = ccr_m1 / 2;
+        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, trigger_motor);
 
-      // BYPASS PARA BANCADA: Jogue a leitura do potenciômetro direto para o atuador (LED)
-      float esforco_m1 = setpoint_m1;
-      float esforco_m2 = setpoint_m2;
+        ciclo_pi++;
+      }
+      else if (ciclo_pi == 38) 
+      {
+        // --- CICLO 38 (Aos 195 ms): 1ª Medição (Barramento) e Abertura por 5 ms ---
+        
+        // 1ª Medição: Antes de desligar o PWM de 1 kHz, o ADC Injetado acabou de ler
+        // a tensão com o diodo de roda livre conduzindo (Tensão Instantânea do Barramento)
+        tensao_barramento1 = (uint16_t)MAP((int32_t)HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_1), 0, ADC_MAX_VAL, 0, 1000);
+        tensao_barramento2 = (uint16_t)MAP((int32_t)HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_2), 0, ADC_MAX_VAL, 0, 1000);
 
-      //PWM PA8 (Mantém igual)
-      __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, MAX(1000-esforco_m1,pwm_max) );
-      //PWM PA9 (Mantém igual)
-      __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, MAX(1000-esforco_m2,pwm_max) );
+        // Corta os PWMs para iniciar a janela de 5 ms de descarga da corrente do indutor
+        zera_pwm();
 
-      //o trigger motor é colocado no CCR do tim1 ch4, após a metade do tempo em que o PWM está em 1, o ch4 vai para 0 é a falling edge causa o trigger no ADC
-      //o trigger da leitura do EMF é feito no motor 1 por ele pode estar mais acelerado que o motor 2, portanto, ele tem menos t para ler a EMF
-      
-      uint16_t trigger_motor = MAX(1000-esforco_m1, pwm_max) / 2;
-      __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, trigger_motor);
+        // Mantém o Canal 4 gerando trigger no meio do período de 1 kHz (CCR4 = 500)
+        // para que o ADC Injetado continue amostrando durante os 5 ms de chave aberta
+        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, 500);
+
+        ciclo_pi++;
+      }
+      else 
+      {
+        // --- CICLO 39 (Aos 200 ms): 2ª Medição (Back-EMF), Cálculo do PI (5 Hz) e Religação ---
+        
+        // Após 5 ms de chave aberta, a corrente do diodo caiu a zero.
+        // A função emf() faz a 2ª medição (Vbus - Vbemf) e calcula a diferença contra tensao_barramento1/2
+        emf();
+
+        float velocidade_real_m1 = (float)emfmot1;
+        float velocidade_real_m2 = (float)emfmot2;
+
+        // Cálculo do PI a 5 Hz (Descomente quando for fechar a malha com os motores):
+        // esforco_m1 = calcular_PID(&pid_motor1, setpoint_m1, velocidade_real_m1);
+        // esforco_m2 = calcular_PID(&pid_motor2, setpoint_m2, velocidade_real_m2);
+
+        // BYPASS PARA BANCADA (Comente as duas linhas abaixo quando descomentar o calcular_PID acima):
+        esforco_m1 = setpoint_m1;
+        esforco_m2 = setpoint_m2;
+
+        // Religa imediatamente os PWMs com o novo esforço calculado pelo PI
+        uint16_t ccr_m1 = (uint16_t)MAX(1000.0f - esforco_m1, (float)pwm_max);
+        uint16_t ccr_m2 = (uint16_t)MAX(1000.0f - esforco_m2, (float)pwm_max);
+
+        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, ccr_m1);
+        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, ccr_m2);
+
+        uint16_t trigger_motor = ccr_m1 / 2;
+        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, trigger_motor);
+
+        // Reinicia o ciclo de 200 ms (5 Hz)
+        ciclo_pi = 0;
+      }
+
     } else {
-      //se o sistema não está liberado -> pwm = 0
+      // 1. Corta imediatamente o chaveamento de potência (CCR = 1000 na lógica invertida)
       zera_pwm();
+
+      // 2. Mantém o canal fantasma (CH4) em 500 para o ADC Injetado funcionar na calibração
+      __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, 500);
+
+      // 3. Reseta a memória integral dos controladores PI (Motor 1 e Motor 2)
+      resetar_PID(&pid_motor1);
+      resetar_PID(&pid_motor2);
+
+      // 4. Zera os esforços, o contador de ciclo de 5 Hz e a memória do filtro IIR
+      esforco_m1 = 0.0f;
+      esforco_m2 = 0.0f;
+      ciclo_pi = 0;
+      pot1_fiir = 0.0f;
+      pot2_fiir = 0.0f;
     }
     
-    osDelay(DelayControle);
+    tick_controle += DelayControle;
+    osDelayUntil(tick_controle);
   }
   /* USER CODE END StartTaskControle */
 }
@@ -252,11 +332,9 @@ void StartTaskIHM(void *argument)
 {
   /* USER CODE BEGIN StartTaskIHM */
   /* Infinite loop */
+  uint32_t tick_IHM = osKernelGetTickCount();
   for(;;)
   {
-
-    pot1 = MAP(valores_adc[0], 0, ADC_MAX_VAL, 0, 1000 - pwm_max); //comanda a velocidade da bola de 0 ate pwm max para ter folga nos moteres
-    pot2 = MAP(valores_adc[1], 0, ADC_MAX_VAL, 0, 1000);  // comanda o spin da bola
     verifica_botao(); 
     
     if (sistema_liberado == 0) { 
@@ -264,15 +342,15 @@ void StartTaskIHM(void *argument)
     }
 
     /*
-  // Só envia os textos para a tela a cada 300 ms (15 * 20 ms)
+    // Só envia os textos para a tela a cada 300 ms (15 * 20 ms)
     divisor_lcd++;
     if (divisor_lcd >= 15) {
         atualiza_display();
         divisor_lcd = 0;
     }
     */
-    
-    osDelay(20);
+    tick_IHM += DelayIHM;
+    osDelayUntil(tick_IHM);
   }
   /* USER CODE END StartTaskIHM */
 }
@@ -281,4 +359,3 @@ void StartTaskIHM(void *argument)
 /* USER CODE BEGIN Application */
 
 /* USER CODE END Application */
-
