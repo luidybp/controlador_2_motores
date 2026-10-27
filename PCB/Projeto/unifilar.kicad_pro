@@ -488,6 +488,7 @@
       "pin_to_pin": "warning",
       "power_pin_not_driven": "error",
       "same_local_global_label": "warning",
+      "same_local_global_power": "warning",
       "similar_label_and_power": "warning",
       "similar_labels": "warning",
       "similar_power": "warning",
@@ -721,7 +722,7 @@
         "uuid": "137335de-0a04-4eac-b0ef-d8caa5f52f71"
       }
     ],
-    "used_designators": "D1-9,R1-24,J1-5,U1-4,Fonte_13,C1-14,PWMs1,Q1-8,SHUNT1,REDE1,RV1-2,#PWR1-28,SW1,Fonte_12V1,NT1,HS1",
+    "used_designators": "#PWR1-28,C1-14,D1-9,Fonte_13,Fonte_12V1,HS1,J1-5,NT1,PWMs1,Q1-8,R1-24,REDE1,RV1-2,SHUNT1,SW1,U1-4",
     "variants": []
   },
   "sheets": [
