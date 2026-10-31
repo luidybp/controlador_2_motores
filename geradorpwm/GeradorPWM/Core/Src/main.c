@@ -2,17 +2,7 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
+  * @brief          : Rotina de mapeamento de Vds (Back-EMF) por degraus de PWM
   ******************************************************************************
   */
 /* USER CODE END Header */
@@ -34,6 +24,12 @@
 #define MAX(a,b) (((a)>(b))?(a):(b))
 #define MAP(x, in_min, in_max, out_min, out_max) (((x) - (in_min)) * ((out_max) - (out_min)) / ((in_max) - (in_min)) + (out_min))
 #define ADC_MAX_VAL 4095
+
+// Parâmetros do Mapeamento
+#define DUTY_MIN_TESTE  10   // Começa em 10%
+#define DUTY_MAX_TESTE  80   // Vai até 80% (compatível com pwm_max = 200). Mude para 100 se desejar ir até 100%
+#define PASSO_DUTY      5    // Sobe de 5% em 5%
+#define NUM_PONTOS      (((DUTY_MAX_TESTE - DUTY_MIN_TESTE) / PASSO_DUTY) + 1)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -48,16 +44,16 @@ DMA_HandleTypeDef hdma_adc1;
 TIM_HandleTypeDef htim1;
 
 /* USER CODE BEGIN PV */
-uint16_t frequencia_pwm = 1000;
-uint8_t estado_botao_anterior = 1; // Assumindo GPIO_PULLUP (1 = solto, 0 = apertado)
+uint8_t estado_botao_anterior = 1; // GPIO_PULLUP (1 = solto, 0 = apertado)
+volatile uint16_t valores_adc[1];  // Recebe a leitura contínua do Canal 5 (PA5) via DMA
 
-uint16_t pwm_max = 200;
-uint16_t pot1 = 0;
-float pot1_fiir = 0;
-uint16_t pot1_fiir_int = 0;
-volatile uint16_t valores_adc[1];
-float alpha = 0.05f;
+// Matriz de armazenamento:
+// Coluna [0] = % do Duty Cycle (10, 15, 20...)
+// Coluna [1] = Valor bruto do ADC lido no Vds (0 a 4095)
+// Coluna [2] = Valor normalizado (0 a 1000), igual ao código principal
+volatile uint16_t matriz_mapeamento[NUM_PONTOS][3];
 
+volatile uint8_t mapeamento_concluido = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -67,11 +63,68 @@ static void MX_DMA_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_ADC1_Init(void);
 /* USER CODE BEGIN PFP */
-
+void executar_mapeamento_vds(void);
+void desliga_motores(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+/**
+  * @brief Desliga os MOSFETs (Lógica invertida do Totem-Pole: CCR = 1000 -> Pino 3.3V -> MOSFET OFF)
+  */
+void desliga_motores(void)
+{
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 1000);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 1000);
+}
+
+/**
+  * @brief Executa a rampa de 10% até DUTY_MAX_TESTE em passos de 5%,
+  *        aguardando 3s por degrau e interrompendo por 6ms para ler Vds.
+  */
+void executar_mapeamento_vds(void)
+{
+    uint8_t indice = 0;
+    mapeamento_concluido = 0;
+
+    for (uint16_t duty = DUTY_MIN_TESTE; duty <= DUTY_MAX_TESTE; duty += PASSO_DUTY)
+    {
+        // 1. Converte a % de Duty Cycle (0 a 100%) para a escala invertida do Timer (ARR = 999)
+        // Exemplo: 10% de duty -> pulso ativo de 100 ticks -> CCR = 1000 - 100 = 900
+        uint16_t ccr_invertido = 1000 - (duty * 10);
+
+        // Aplica o PWM nos canais 1 e 2
+        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, ccr_invertido);
+        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, ccr_invertido);
+
+        // 2. Aguarda 3 segundos para estabilizar a rotação e permitir leitura no tacômetro
+        HAL_Delay(3000);
+
+        // 3. Interrupção de 6 ms: Corta o PWM (abre o MOSFET) para a corrente de roda livre zerar
+        desliga_motores();
+        HAL_Delay(6);
+
+        // 4. Medição do Vds ao final dos 6 ms (com o motor atuando como gerador e antes de religar o PWM)
+        uint16_t leitura_adc_bruta = valores_adc[0];
+        uint16_t leitura_normalizada = MAP(leitura_adc_bruta, 0, ADC_MAX_VAL, 0, 1000);
+
+        // 5. Armazena na matriz
+        if (indice < NUM_PONTOS)
+        {
+            matriz_mapeamento[indice][0] = duty;                // % Duty Cycle
+            matriz_mapeamento[indice][1] = leitura_adc_bruta;   // ADC Bruto (0 - 4095)
+            matriz_mapeamento[indice][2] = leitura_normalizada; // Escala (0 - 1000)
+            indice++;
+        }
+    }
+
+    // Fim do ensaio: garante que o motor pare com segurança
+    desliga_motores();
+
+    // COLOQUE SEU BREAKPOINT DO DEBUG AQUI PARA LER A MATRIZ NO VS CODE!
+    mapeamento_concluido = 1;
+}
 
 /* USER CODE END 0 */
 
@@ -81,21 +134,11 @@ static void MX_ADC1_Init(void);
   */
 int main(void)
 {
-
   /* USER CODE BEGIN 1 */
-  HAL_Init();
-  SystemClock_Config();
-
-  MX_GPIO_Init();
-  MX_DMA_Init();
-  MX_TIM1_Init();
-  MX_ADC1_Init();
 
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
-
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
 
   /* USER CODE BEGIN Init */
@@ -114,7 +157,11 @@ int main(void)
   MX_DMA_Init();
   MX_TIM1_Init();
   MX_ADC1_Init();
+
   /* USER CODE BEGIN 2 */
+  // Garante que o motor comece desligado (CCR = 1000) antes de ligar os canais PWM
+  desliga_motores();
+
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
   HAL_ADC_Start_DMA(&hadc1, (uint32_t*)valores_adc, 1);
@@ -127,43 +174,24 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-// 1. Leitura do botão com detecção de clique único e debounce
+    // Aguarda o clique no botão para iniciar a bateria de testes de mapeamento
     uint8_t leitura_botao = HAL_GPIO_ReadPin(bot_GPIO_Port, bot_Pin);
 
-    if (leitura_botao == 0 && estado_botao_anterior == 1) 
+    if (leitura_botao == 0 && estado_botao_anterior == 1)
     {
-        // Reduz a frequência em 100 Hz
-        frequencia_pwm -= 100;
-
-        // Se chegar em 100 Hz, o próximo clique zera para 1000 Hz
-        if (frequencia_pwm < 100) 
+        HAL_Delay(50); // Debounce inicial
+        if (HAL_GPIO_ReadPin(bot_GPIO_Port, bot_Pin) == 0)
         {
-            frequencia_pwm = 1000;
+            // Inicia a rotina automática de mapeamento
+            executar_mapeamento_vds();
         }
-
-        // 2. Calcula e injeta o novo Prescaler no hardware do Timer 1
-        uint16_t novo_psc = (100000 / frequencia_pwm) - 1;
-        __HAL_TIM_SET_PRESCALER(&htim1, novo_psc);
-
-        // 3. Delay de debounce para ignorar o "quique" mecânico do botão
-        HAL_Delay(50); 
     }
     estado_botao_anterior = leitura_botao;
 
-    // --- Sua lógica de controle original abaixo ---
-    pot1 = MAP(valores_adc[0], 0, ADC_MAX_VAL, 0, 1000 - pwm_max);
-    pot1_fiir = (alpha * pot1) + ((1.0f - alpha) * pot1_fiir);
-    uint16_t pot1_fiir_int = (uint16_t)pot1_fiir;
-
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, MAX(1000-pot1_fiir_int,pwm_max) );
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, MAX(1000-pot1_fiir_int,pwm_max) );
-    
-    HAL_Delay(5);
-  }
+    HAL_Delay(10);
   }
   /* USER CODE END 3 */
-
-
+}
 /**
   * @brief System Clock Configuration
   * @retval None

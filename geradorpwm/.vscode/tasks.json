@@ -4,10 +4,10 @@
         {
             "label": "GRAVAR FIRMWARE (Flash)",
             "type": "shell",
-            "command": "STM32_Programmer_CLI",
+            "command": "C:\\Program Files\\STMicroelectronics\\STM32Cube\\STM32CubeProgrammer\\bin\\STM32_Programmer_CLI.exe",
             "args": [
                 "-c", "port=SWD",
-                "-w", "${workspaceFolder}/build/Debug/tcc.elf",
+                "-w", "${workspaceFolder}/build/Debug/GeradorPWM.elf",
                 "-v",
                 "-rst"
             ],
